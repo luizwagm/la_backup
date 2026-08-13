@@ -1,0 +1,22 @@
+[Unit]
+Description=LA Backup — copia de todos os projetos para o Cloudflare R2
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/la-backup/backup.sh
+# Uma hora e folga larga para dumps de Postgres com o disco ocupado. Sem teto,
+# um backup travado por rede segura o timer do dia seguinte.
+TimeoutStartSec=1h
+# Prioridade baixa de CPU e de disco: o backup nao pode deixar o site lento.
+# `idle` no disco significa "so quando ninguem mais precisa".
+Nice=15
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=la-backup
+
+[Install]
+WantedBy=multi-user.target

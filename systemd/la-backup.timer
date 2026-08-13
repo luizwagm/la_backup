@@ -1,0 +1,15 @@
+[Unit]
+Description=LA Backup — todo dia de madrugada
+
+[Timer]
+# 03:20, e nao 03:00: a hora cheia e onde todo cron do mundo dispara junto.
+OnCalendar=*-*-* 03:20:00
+# Espalha ate 20 minutos. Se um dia houver um segundo servidor, os dois nao
+# saem no mesmo segundo disputando banda.
+RandomizedDelaySec=20m
+# Se a maquina estava desligada na hora, roda assim que ligar. Sem isto, um
+# reboot as 03:00 pula o backup do dia inteiro, calado.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

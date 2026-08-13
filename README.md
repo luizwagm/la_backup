@@ -1,0 +1,153 @@
+# LA Backup
+
+Cópia diária de **todos os projetos** do servidor para o Cloudflare R2, cifrada
+antes de sair daqui.
+
+Cobre, sem lista escrita à mão:
+
+- todo banco **SQLite** em `/var/www/projetos/*/dados/*.db`
+- todo banco **PostgreSQL** do servidor (descobertos no catálogo)
+- as pastas de **arquivos enviados** (`fotos/`, `uploads/`) — que não estão no git
+- um **inventário** do dia: o que existia e quais serviços rodavam
+
+Site novo entra sozinho no backup. É o ponto de descobrir em vez de listar: uma
+lista só está certa no dia em que é escrita.
+
+---
+
+## Por que assim
+
+**Cifra do lado de cá.** Os bancos têm nome, telefone, CPF, endereço e — no
+BemEstar — dado de paciente. O restic cifra com uma chave que existe só no
+servidor e no seu gerenciador de senhas. A Cloudflare guarda blocos que ela não
+consegue ler. Sem isso, o backup seria um segundo lugar de onde vazar, e o
+problema seria da empresa perante a LGPD.
+
+**O servidor nunca apaga.** O `backup.sh` só escreve. O único comando que apaga
+é o `restaurar.sh --podar`, e ele é para você rodar quando quiser. Somado à
+trava do bucket, isso é o que impede um servidor invadido de destruir o backup
+junto — que é o roteiro de todo ransomware.
+
+**A trava do bucket é o que fecha a porta.** O R2 permite dizer "nada neste
+bucket pode ser apagado nem sobrescrito por N dias". Com ela, mesmo alguém com
+a chave do servidor na mão não consegue tirar o histórico recente.
+
+**Backup que nunca foi restaurado não é backup.** Por isso existe o `--ensaio`,
+e por isso ele é o comando que o instalador manda você rodar no fim.
+
+---
+
+## Instalar
+
+### 1. No Cloudflare, uma vez
+
+1. **R2 → Create bucket.** Nome: `la-backup`. Localização: automática.
+2. **R2 → Manage R2 API Tokens → Create API Token**
+   - Permissão: **Object Read & Write**
+   - Escopo: **somente o bucket `la-backup`** (não "todos os buckets")
+   - Guarde o **Access Key ID** e o **Secret Access Key** — o segredo aparece
+     uma vez só.
+3. **O ID da conta** está no canto do painel do R2 (`Account ID`).
+
+### 2. A trava do bucket
+
+Sem ela, o backup protege contra disco queimado mas não contra invasão. Com um
+token que tenha permissão de *editar configuração do R2*:
+
+```sh
+curl -X PUT \
+  "https://api.cloudflare.com/client/v4/accounts/<ID_DA_CONTA>/r2/buckets/la-backup/lock" \
+  -H "Authorization: Bearer <TOKEN_DE_CONFIGURACAO>" \
+  -H "Content-Type: application/json" \
+  -d '{"rules":[{"id":"retencao-30-dias","enabled":true,
+        "condition":{"type":"Age","maxAgeSeconds":2592000}}]}'
+```
+
+Trinta dias: um invasor não consegue apagar nada mais novo que isso, e a poda
+mensal continua funcionando sobre o que já passou. Confirme no painel do R2
+depois — a resposta da API não é prova de que a regra ficou ativa.
+
+### 3. No servidor
+
+```sh
+sudo bash instalar.sh
+```
+
+Ele pede as quatro coisas do R2, instala o restic, cria o timer diário e **faz o
+primeiro backup na hora**, com você olhando — para o erro aparecer agora e não
+às três da manhã.
+
+Se você deixar a senha de cifra em branco, ele sorteia uma e obriga a confirmar
+que foi para o gerenciador de senhas antes de gravar qualquer coisa.
+
+> **Perder a senha de cifra é perder o backup inteiro.** Não há recuperação,
+> nem pela Cloudflare, nem por mim. É o mesmo risco do `DADOS_CHAVE` do
+> BemEstar. Guarde-a no gerenciador **antes** de continuar.
+
+### 4. O ensaio
+
+```sh
+sudo bash /opt/la-backup/restaurar.sh --ensaio
+```
+
+Baixa o último snapshot de verdade, abre cada SQLite com `integrity_check` e lê
+cada dump do PostgreSQL com `pg_restore --list`. Se passar, o backup presta
+hoje. **Rode uma vez por mês.**
+
+---
+
+## Uso
+
+| Comando | O que faz |
+|---|---|
+| `bash verificar.sh` | o backup existe? de quando é? o timer está de pé? |
+| `bash restaurar.sh --ensaio` | o backup **presta**? (abre tudo de verdade) |
+| `bash restaurar.sh --listar` | os snapshots guardados |
+| `bash restaurar.sh --ver <id>` | o que tem dentro de um snapshot |
+| `bash restaurar.sh --baixar <id> <pasta>` | traz um snapshot para o disco |
+| `bash restaurar.sh --podar` | **o único que apaga** — recupera espaço |
+
+## Restaurar de verdade, depois do desastre
+
+```sh
+# 1. numa máquina nova, com o restic instalado:
+export RESTIC_REPOSITORY=s3:https://<CONTA>.r2.cloudflarestorage.com/la-backup
+export RESTIC_PASSWORD=<a senha do gerenciador>
+export AWS_ACCESS_KEY_ID=<...>
+export AWS_SECRET_ACCESS_KEY=<...>
+
+restic snapshots                       # escolha o dia
+restic restore <id> --target /tmp/volta
+
+# 2. SQLite: é só copiar o arquivo para dados/ do projeto
+cp /tmp/volta/**/sqlite/Riacho-Solar--site.db /var/www/projetos/Riacho-Solar/dados/site.db
+
+# 3. PostgreSQL:
+sudo -u postgres createdb bordatudo
+sudo -u postgres pg_restore -d bordatudo /tmp/volta/**/postgres/bordatudo.dump
+```
+
+O `INVENTARIO.txt` de dentro do snapshot diz o que existia naquele dia e quais
+serviços rodavam — a pergunta que ninguém responde de memória seis meses depois.
+
+---
+
+## Retenção e custo
+
+Guarda 14 diários, 8 semanais, 12 mensais e 3 anuais. Como o restic deduplica e
+os bancos mudam pouco de um dia para o outro, o segundo backup custa quase nada
+em espaço.
+
+Na escala destes dez projetos, isso cabe folgado nos **10 GB gratuitos do R2**.
+O R2 também não cobra taxa de saída, o que importa no dia em que você precisar
+baixar tudo — é justamente o dia em que o custo não pode ser uma surpresa.
+
+## O que ainda não está resolvido
+
+- **Aviso quando falhar.** Hoje, se o backup morrer três noites seguidas, quem
+  descobre é quem rodar o `verificar.sh`. O certo é o LA Sentinela — que já
+  monitora os sites — passar a olhar a idade do último snapshot e avisar. É o
+  próximo passo natural, e não fiz agora para não misturar duas entregas.
+- **Uma segunda cópia fora da Cloudflare.** Um backup num lugar só ainda é um
+  ponto de falha, menor mas existente. Se quiser, o mesmo `backup.sh` manda
+  para dois destinos com poucas linhas.
