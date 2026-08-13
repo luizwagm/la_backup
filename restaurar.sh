@@ -78,6 +78,16 @@ case "${1:---ensaio}" in
     QUANDO="$(restic snapshots --latest 1 --json | sed -n 's/.*"time":"\([^"]*\)".*/\1/p' | head -1)"
     v "último snapshot: $ID  ($QUANDO)"
 
+    # O ENSAIO REPROVA SNAPSHOT INCOMPLETO.
+    # Sem este teste, um backup SEM os bancos do PostgreSQL passaria: os SQLite
+    # que sobraram abrem perfeitamente, e o ensaio diria "presta". Passar aqui
+    # tem de significar "dá para restaurar TUDO", e não "o que sobrou abre".
+    if restic snapshots --latest 1 --json | grep -q 'INCOMPLETO'; then
+      x "o último snapshot está marcado INCOMPLETO — faltam itens dentro dele."
+      x "O que falhou está no log: journalctl -u la-backup -n 60"
+      exit 1
+    fi
+
     # IDADE. Um backup de três semanas atrás é um backup que parou de rodar e
     # ninguém viu. Este teste é o que transforma "o timer morreu" em algo
     # visível antes do desastre.

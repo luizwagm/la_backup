@@ -49,6 +49,8 @@ x() { printf '  \033[31m✖\033[0m %s\n' "$*"; }
 export RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
 echo ""
+FALHAS=0
+
 echo "  LA Backup — $(date '+%d/%m/%Y %H:%M:%S')"
 echo "  ------------------------------------------------------"
 
@@ -80,11 +82,13 @@ while IFS= read -r banco; do
       v "$PROJ/$(basename "$banco")  $(du -h "$ALVO" | cut -f1)"
       N_SQLITE=$((N_SQLITE + 1))
     else
-      x "$PROJ/$(basename "$banco") — íntegridade REPROVADA, não vai no backup"
+      x "$PROJ/$(basename "$banco") — INTEGRIDADE REPROVADA, não vai no backup"
       rm -f "$ALVO"
+      FALHAS=$((FALHAS + 1))
     fi
   else
     x "$PROJ/$(basename "$banco") — não consegui copiar"
+    FALHAS=$((FALHAS + 1))
   fi
 done < <(find "$RAIZ_PROJETOS" -mindepth 3 -maxdepth 3 -path '*/dados/*.db' 2>/dev/null | sort)
 [ "$N_SQLITE" -gt 0 ] || a "nenhum banco SQLite encontrado"
@@ -98,21 +102,44 @@ if command -v psql >/dev/null 2>&1 && systemctl is-active --quiet postgresql 2>/
   # Descobre os bancos no CATÁLOGO, como o usuário `postgres` (autenticação
   # local por par). Assim não preciso da senha de nenhum projeto — e um projeto
   # novo entra no backup sem ninguém editar este arquivo.
+  ESPERADOS=0
   while IFS= read -r bd; do
     [ -n "$bd" ] || continue
+    ESPERADOS=$((ESPERADOS + 1))
     ALVO="$TRABALHO/postgres/$bd.dump"
+    # O REDIRECIONAMENTO É FEITO POR ROOT, NÃO PELO pg_dump.
+    #
+    # A primeira versão usava `pg_dump -f "$ALVO"`. O `-f` faz o PRÓPRIO
+    # pg_dump abrir o arquivo — e ele roda como usuário `postgres`, que não
+    # tem permissão de escrever em /var/tmp/la-backup (0700, dono root). Os
+    # oito bancos falharam com "could not open output file: Permission
+    # denied", mensagem que eu estava jogando fora com 2>/dev/null.
+    #
+    # Com `> "$ALVO"`, quem cria o arquivo é o shell que já roda como root; o
+    # pg_dump só escreve na saída padrão e não precisa de permissão nenhuma.
+    #
     # `-Fc` é o formato próprio do pg: comprimido, e restaura tabela a tabela
     # com `pg_restore`. Um .sql de texto obriga a restaurar tudo ou nada.
-    if sudo -u postgres pg_dump -Fc -f "$ALVO" "$bd" 2>/dev/null; then
+    if sudo -u postgres pg_dump -Fc "$bd" > "$ALVO" 2>"$TRABALHO/.erro"; then
       v "$bd  $(du -h "$ALVO" | cut -f1)"
       N_PG=$((N_PG + 1))
     else
-      x "$bd — pg_dump falhou"
+      # O ERRO VAI PARA A TELA. Engoli-lo foi o que transformou oito falhas em
+      # oito linhas que não diziam o que fazer.
+      x "$bd — pg_dump falhou:"
+      sed 's/^/         /' "$TRABALHO/.erro" | head -3
+      rm -f "$ALVO"
+      FALHAS=$((FALHAS + 1))
     fi
   done < <(sudo -u postgres psql -Atc \
     "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres' ORDER BY 1" \
     2>/dev/null)
-  [ "$N_PG" -gt 0 ] || a "nenhum banco PostgreSQL encontrado"
+  rm -f "$TRABALHO/.erro"
+  if [ "$ESPERADOS" -eq 0 ]; then
+    a "nenhum banco PostgreSQL neste servidor"
+  elif [ "$N_PG" -lt "$ESPERADOS" ]; then
+    x "$N_PG de $ESPERADOS bancos PostgreSQL foram copiados"
+  fi
 else
   a "PostgreSQL não está no ar aqui — pulando"
 fi
@@ -177,8 +204,15 @@ if ! restic snapshots >/dev/null 2>&1; then
   restic init
 fi
 
+# O SNAPSHOT INCOMPLETO É MARCADO COMO TAL.
+# Sem esta etiqueta, um backup sem os oito bancos do PostgreSQL fica na lista
+# ao lado dos completos, com a mesma cara. No dia da restauração, escolher pelo
+# "mais recente" seria escolher justamente o que não tem nada.
+ETIQUETA="completo"
+[ "$FALHAS" -eq 0 ] || ETIQUETA="INCOMPLETO"
+
 restic backup "$TRABALHO" \
-  --tag automatico \
+  --tag automatico --tag "$ETIQUETA" \
   --host "$(hostname)" \
   --exclude-caches \
   --compression auto \
@@ -202,6 +236,35 @@ if echo "$ULTIMO" | grep -q '"time"'; then
   v "guardados: $N_SQLITE SQLite · $N_PG PostgreSQL · $N_ARQ pastas"
 else
   x "o snapshot NÃO apareceu no repositório depois do envio."
+  exit 1
+fi
+
+# ------------------------------------------------- 8. FALHA É FALHA
+#
+# Esta é a parte que a primeira versão não tinha, e a falta dela foi o pior
+# defeito de tudo que escrevi aqui.
+#
+# Na primeira execução no servidor, os OITO bancos PostgreSQL falharam — entre
+# eles o do BemEstar, que tem dado de paciente — e o script terminou com um
+# visto verde e a frase "Pronto". O único guarda que existia disparava se NADA
+# fosse encontrado; um único SQLite bastou para o backup passar por completo.
+#
+# Backup parcial que se anuncia como sucesso é PIOR que backup nenhum: com
+# backup nenhum a pessoa sabe que está descoberta. Aqui ela dorme tranquila
+# achando que tem os bancos, e descobre no dia em que precisa.
+#
+# O que é enviado continua sendo enviado — meio backup vale mais que zero. O
+# que muda é que o código de saída é DIFERENTE DE ZERO, o systemd marca o
+# serviço como falho, o `verificar.sh` grita, e o snapshot fica etiquetado.
+if [ "$FALHAS" -gt 0 ]; then
+  echo ""
+  x "══════════════════════════════════════════════════════"
+  x "  ESTE BACKUP ESTÁ INCOMPLETO: $FALHAS item(ns) falharam."
+  x "  O que deu certo FOI enviado e está no snapshot acima,"
+  x "  mas NÃO trate isto como um backup bom."
+  x "  Os erros de cada item estão logo acima, na saída."
+  x "══════════════════════════════════════════════════════"
+  echo ""
   exit 1
 fi
 echo ""

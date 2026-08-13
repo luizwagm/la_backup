@@ -142,6 +142,25 @@ Na escala destes dez projetos, isso cabe folgado nos **10 GB gratuitos do R2**.
 O R2 também não cobra taxa de saída, o que importa no dia em que você precisar
 baixar tudo — é justamente o dia em que o custo não pode ser uma surpresa.
 
+## Backup incompleto é tratado como FALHA
+
+Se qualquer item não puder ser copiado, o script:
+
+1. imprime o erro real daquele item (não engole a mensagem);
+2. envia mesmo assim o que deu certo — meio backup vale mais que zero;
+3. etiqueta o snapshot como `INCOMPLETO`;
+4. **sai com código diferente de zero**, então o systemd marca o serviço como
+   falho e o `verificar.sh` grita;
+5. e o `restaurar.sh --ensaio` **reprova** enquanto o último snapshot estiver
+   incompleto — sem isso ele diria "presta", porque os SQLite que sobraram
+   abrem perfeitamente.
+
+Isso existe porque a primeira execução no servidor falhou nos oito bancos
+PostgreSQL — inclusive o do BemEstar, com dado de paciente — e a versão
+anterior terminou com um visto verde e a palavra Pronto. Backup parcial que
+se anuncia como sucesso é pior que backup nenhum: sem backup a pessoa sabe que
+está descoberta; assim ela dorme tranquila e descobre no dia em que precisa.
+
 ## O que ainda não está resolvido
 
 - **Aviso quando falhar.** Hoje, se o backup morrer três noites seguidas, quem

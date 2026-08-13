@@ -1,6 +1,6 @@
 {
   "name": "la-backup",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Backup diario cifrado de todos os projetos do servidor para o Cloudflare R2.",
   "scripts": {
