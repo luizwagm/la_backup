@@ -70,8 +70,20 @@ N_SQLITE=0
 mkdir -p "$TRABALHO/sqlite"
 while IFS= read -r banco; do
   [ -f "$banco" ] || continue
-  PROJ="$(basename "$(dirname "$(dirname "$banco")")")"
-  ALVO="$TRABALHO/sqlite/${PROJ}--$(basename "$banco")"
+
+  # É MESMO UM SQLITE? Os 16 primeiros bytes de todo banco SQLite são
+  # "SQLite format 3\0". Sem esta conferência, um `.db` que na verdade é outra
+  # coisa entraria na lista, falharia no `.backup` e contaria como falha —
+  # barulho que esconderia a falha de verdade.
+  if [ "$(head -c 15 "$banco" 2>/dev/null)" != "SQLite format 3" ]; then continue; fi
+
+  # O NOME DO ALVO CARREGA O CAMINHO INTEIRO, não só o arquivo.
+  # O BemEstar e o Kenósis têm DOIS bancos cada (site.db e gestao.db). Com o
+  # nome curto, `Projeto--site.db` de um sobrescreveria o do outro se algum dia
+  # dois bancos caírem na mesma pasta — e a perda seria silenciosa.
+  REL="${banco#"$RAIZ_PROJETOS"/}"
+  ALVO="$TRABALHO/sqlite/$(echo "$REL" | tr '/' '~')"
+  PROJ="${REL%%/*}"
   # `.backup` do sqlite3, NUNCA `cp`. Com o WAL ligado — e todos estes bancos
   # estão — copiar o arquivo enquanto alguém escreve produz um banco que ABRE e
   # está corrompido. É o pior tipo de backup: parece que existe.
@@ -90,8 +102,35 @@ while IFS= read -r banco; do
     x "$PROJ/$(basename "$banco") — não consegui copiar"
     FALHAS=$((FALHAS + 1))
   fi
-done < <(find "$RAIZ_PROJETOS" -mindepth 3 -maxdepth 3 -path '*/dados/*.db' 2>/dev/null | sort)
-[ "$N_SQLITE" -gt 0 ] || a "nenhum banco SQLite encontrado"
+done < <(
+  # PROCURA POR CONTEÚDO, NÃO POR CAMINHO.
+  #
+  # A primeira versão procurava só em `*/dados/*.db`. Rodando no servidor, ela
+  # achou UM banco de dezoito — porque os dezessete outros projetos usam
+  # `data/`, e `dados/` foi uma escolha minha no Riacho Solar, feita dois dias
+  # antes. Eu tinha escrito "descobre, não lista" no cabeçalho deste arquivo e
+  # mesmo assim chutei o nome da pasta; um chute é uma lista de um item só.
+  #
+  # Agora procura qualquer arquivo de banco em qualquer lugar do projeto, até
+  # quatro níveis, e confere pelo cabeçalho se é SQLite de verdade. O nome da
+  # pasta deixou de importar.
+  #
+  # `node_modules` fica de fora porque bibliotecas trazem bancos de teste.
+  # `backups` fica de fora porque são cópias do mesmo banco — o restic
+  # deduplicaria, mas a lista na tela viraria ilegível.
+  find "$RAIZ_PROJETOS" -maxdepth 4 -type f \
+       \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) \
+       -not -path '*/node_modules/*' \
+       -not -path '*/backups/*' \
+       -not -path '*/.git/*' \
+       -not -name '*-wal' -not -name '*-shm' \
+       2>/dev/null | sort
+)
+if [ "$N_SQLITE" -eq 0 ]; then
+  a "nenhum banco SQLite encontrado"
+else
+  v "$N_SQLITE bancos SQLite"
+fi
 
 # --------------------------------------------------------- 2. PostgreSQL
 echo ""
@@ -151,20 +190,38 @@ echo ""
 echo "  Arquivos enviados"
 N_ARQ=0
 mkdir -p "$TRABALHO/arquivos"
-for pasta in "$RAIZ_PROJETOS"/*/fotos "$RAIZ_PROJETOS"/*/uploads "$RAIZ_PROJETOS"/*/dados/fotos; do
+# O MESMO ERRO DOS BANCOS VALIA AQUI: a versão anterior tinha três caminhos
+# chutados (`fotos`, `uploads`, `dados/fotos`) e achou zero pastas no servidor.
+# Agora procura por NOME PARCIAL, em qualquer profundidade até três, e pula o
+# que é do repositório (as imagens em `assets/` estão no git; anexo de cliente
+# não está, e é esse que só existe no disco).
+while IFS= read -r pasta; do
   [ -d "$pasta" ] || continue
-  PROJ="$(basename "$(dirname "$pasta")")"
-  [ "$PROJ" = "dados" ] && PROJ="$(basename "$(dirname "$(dirname "$pasta")")")"
-  DEST="$TRABALHO/arquivos/$PROJ-$(basename "$pasta")"
+  # Pasta vazia não vira linha na tela nem pasta no snapshot.
+  [ -n "$(ls -A "$pasta" 2>/dev/null)" ] || continue
+  REL="${pasta#"$RAIZ_PROJETOS"/}"
+  PROJ="${REL%%/*}"
+  DEST="$TRABALHO/arquivos/$(echo "$REL" | tr '/' '~')"
   mkdir -p "$DEST"
   # `cp -al` faz LIGAÇÃO RÍGIDA em vez de copiar: não gasta disco nem tempo, e
   # o restic lê o mesmo conteúdo. Numa pasta com milhares de fotos, a diferença
   # é entre segundos e minutos — e entre caber e não caber no /var/tmp.
   if cp -al "$pasta"/. "$DEST"/ 2>/dev/null || cp -a "$pasta"/. "$DEST"/ 2>/dev/null; then
-    v "$PROJ/$(basename "$pasta")  $(du -sh "$DEST" | cut -f1)"
+    v "$REL  $(du -sh "$DEST" | cut -f1)"
     N_ARQ=$((N_ARQ + 1))
+  else
+    x "$REL — não consegui copiar"
+    FALHAS=$((FALHAS + 1))
   fi
-done
+done < <(
+  find "$RAIZ_PROJETOS" -maxdepth 3 -type d \
+       \( -iname '*foto*' -o -iname '*upload*' -o -iname '*anexo*' -o -iname '*arquivo*' \
+          -o -iname '*imagem*' -o -iname '*midia*' -o -iname '*documento*' \) \
+       -not -path '*/node_modules/*' \
+       -not -path '*/.git/*' \
+       -not -path '*/assets/*' \
+       2>/dev/null | sort
+)
 [ "$N_ARQ" -gt 0 ] || a "nenhuma pasta de arquivos enviados"
 
 # --------------------------------------------------- 4. o que foi guardado
