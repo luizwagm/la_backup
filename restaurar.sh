@@ -4,6 +4,7 @@
 #
 #      bash restaurar.sh --ensaio          confere que o backup PRESTA
 #      bash restaurar.sh --listar          mostra os snapshots
+#      bash restaurar.sh --conferir [10%]  os bytes no Cloudflare estao integros?
 #      bash restaurar.sh --ver <id>        mostra o que tem dentro de um
 #      bash restaurar.sh --baixar <id> <pasta>   traz um snapshot para cá
 #      bash restaurar.sh --podar           apaga o que a política já esqueceu
@@ -54,6 +55,48 @@ case "${1:---ensaio}" in
     v "restaurado em $3"
     echo ""
     a "os arquivos estão EM CLARO agora. Apague quando terminar."
+    ;;
+
+  --conferir)
+    # ------------------------------------------------------------------
+    # "O QUE ESTÁ NO CLOUDFLARE ESTÁ ÍNTEGRO?"
+    #
+    # Diferente do `--ensaio`, que pergunta "dá para restaurar?". Este pergunta
+    # "os bytes que subiram são os bytes certos?".
+    #
+    # `restic check` SEM `--read-data` confere só a estrutura: se os índices
+    # batem com a lista de arquivos. Ele passa mesmo que um bloco tenha sido
+    # corrompido no caminho ou no disco da Cloudflare — porque nem chega a
+    # baixar o conteúdo. É o teste que dá falsa tranquilidade.
+    #
+    # `--read-data-subset` BAIXA uma amostra e recalcula o hash de cada bloco.
+    # Se um byte mudou, aparece aqui. 10% por padrão porque conferir tudo todo
+    # mês gastaria banda à toa; ao longo de dez meses, a amostra cobre o
+    # repositório inteiro.
+    # ------------------------------------------------------------------
+    FATIA="${2:-10%}"
+    echo ""
+    echo "  CONFERINDO O QUE ESTÁ NO CLOUDFLARE — $(date '+%d/%m/%Y %H:%M')"
+    echo "  ------------------------------------------------------"
+    echo "  Baixando $FATIA dos dados e recalculando os hashes."
+    echo "  (o resto do repositório é conferido nas próximas execuções)"
+    echo ""
+    if restic check --read-data-subset="$FATIA" 2>&1 | sed 's/^/     /'; then
+      echo ""
+      v "estrutura e dados conferem — o que está lá é o que subiu daqui"
+    else
+      echo ""
+      x "O REPOSITÓRIO TEM PROBLEMA. Não confie neste backup."
+      x "Rode 'restic check --read-data' (tudo) para ver a extensão."
+      exit 1
+    fi
+    echo ""
+    echo "  Quanto está guardado:"
+    restic stats --mode raw-data 2>/dev/null | sed 's/^/     /'
+    echo ""
+    echo "  Por snapshot (o que cada dia realmente contém):"
+    restic stats --mode restore-size latest 2>/dev/null | sed 's/^/     /'
+    echo ""
     ;;
 
   --podar)

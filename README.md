@@ -5,13 +5,20 @@ antes de sair daqui.
 
 Cobre, sem lista escrita à mão:
 
-- todo banco **SQLite** em `/var/www/projetos/*/dados/*.db`
+- todo banco **SQLite** de qualquer projeto — achado pelo **conteúdo** do
+  arquivo (`SQLite format 3`), não pelo nome da pasta
 - todo banco **PostgreSQL** do servidor (descobertos no catálogo)
-- as pastas de **arquivos enviados** (`fotos/`, `uploads/`) — que não estão no git
+- as pastas de **arquivos enviados** — anexo, foto, mídia, documento — que não
+  estão no git e só existem no disco
 - um **inventário** do dia: o que existia e quais serviços rodavam
 
 Site novo entra sozinho no backup. É o ponto de descobrir em vez de listar: uma
 lista só está certa no dia em que é escrita.
+
+> Isto não é teoria. A primeira versão procurava em `*/dados/*.db` e achou **1
+> banco de 18** — os outros dezessete projetos usam `data/`, e `dados/` tinha
+> sido uma escolha minha num projeto novo. Caminho chutado é lista de um item
+> só.
 
 ---
 
@@ -103,6 +110,7 @@ hoje. **Rode uma vez por mês.**
 | `bash verificar.sh` | o backup existe? de quando é? o timer está de pé? |
 | `bash restaurar.sh --ensaio` | o backup **presta**? (abre tudo de verdade) |
 | `bash restaurar.sh --listar` | os snapshots guardados |
+| `bash restaurar.sh --conferir` | **os bytes no Cloudflare estão íntegros?** baixa 10% e recalcula os hashes |
 | `bash restaurar.sh --ver <id>` | o que tem dentro de um snapshot |
 | `bash restaurar.sh --baixar <id> <pasta>` | traz um snapshot para o disco |
 | `bash restaurar.sh --podar` | **o único que apaga** — recupera espaço |
