@@ -73,9 +73,29 @@ Tudo. Eu esvaziaria às 4h para encher de novo às 5h, com um dump a mais por di
 de custo. Deixando a mais recente, o ciclo de 24h de cada site segue intacto e o
 painel do cliente continua respondendo "quando foi a última cópia".
 
-**O que a limpeza não toca:** arquivo que não é banco (um `LEIA-ME`, um
-`.gitkeep`), subpasta, atalho — e nada que tenha sido gravado **depois** do
-momento em que o histórico foi copiado, porque esse ainda não está no snapshot.
+### A limpeza apaga BANCO, e só banco
+
+Foto, anexo, PDF, documento do cliente: **nunca**. Nem dentro de uma pasta
+`backups/`.
+
+E a pergunta "isto é um banco?" é respondida pelo **conteúdo** do arquivo, não
+pelo nome — o mesmo princípio do resto do projeto. Um `.db` precisa começar com
+`SQLite format 3`, um `.sql` precisa ser um dump do PostgreSQL, um `.dump`
+precisa começar com `PGDMP`. Não passou, não é tocado.
+
+> Uma versão desta limpeza aceitava `.gz` e `.zip`. Pela extensão, um dump
+> comprimido e um zip de fotos do cliente são a mesma coisa — e a diferença só
+> apareceria depois de apagar. Os dois saíram da lista.
+
+Isso protege um caso que decidir por nome não protegeria: uma imagem chamada
+`site.2026-12-31.db` seria eleita "a cópia mais recente", ficaria na pasta, e
+levaria junto o banco de verdade mais novo — apagando exatamente o que a
+limpeza existe para preservar.
+
+**A limpeza também não toca:** subpasta nenhuma (`backups/fotos/` não é sequer
+olhada), atalho nenhum (um link simbólico chamado `site.db` apontando para o
+banco vivo faria o `rm` acertar o cliente), e nada gravado **depois** do momento
+em que o histórico foi copiado — esse ainda não está no snapshot.
 
 ---
 

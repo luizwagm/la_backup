@@ -435,10 +435,41 @@ fi
 # pasta às 4h para ela encher de novo às 5h, com um dump a mais por dia de
 # custo. Deixando a mais recente, o ciclo de 24h de cada site segue intacto e o
 # painel do cliente continua mostrando quando foi a última cópia.
+
+# SÓ BANCO DE DADOS SAI DAQUI. Foto, anexo e documento NUNCA.
+#
+# E a pergunta "isto é um banco?" é respondida pelo CONTEÚDO do arquivo, não
+# pelo nome — o mesmo motivo do passo 1, e a mesma lição do dia em que o
+# servidor autorizou `GET /server.js` porque a regra olhava extensão.
+#
+# A versão anterior desta limpeza aceitava `.gz` e `.zip`. Pela extensão, um
+# dump comprimido e um zip de fotos do cliente são a mesma coisa — e o erro só
+# apareceria depois de apagar. Saíram da lista: se um dia houver dump
+# comprimido, ele entra aqui com uma conferência de conteúdo própria.
+#
+# Quem não passar nesta função não é sequer CONTADO na hora de eleger a cópia
+# mais recente. Isso importa: um arquivo qualquer chamado `site.2026-12-31.db`
+# seria eleito o mais novo da família, ficaria, e levaria junto o banco de
+# verdade mais recente — apagando o único que interessava guardar.
+# O `tr -d '\0'` não é enfeite: lendo o começo de um arquivo binário — uma foto
+# chamada `.db`, por exemplo — o bash escreve "ignored null byte in input" no
+# journal a cada noite. A comparação já dava o resultado certo; o que o `tr`
+# evita é um aviso repetido que, com o tempo, ensina a ignorar o log do backup.
+# Nenhum dos cabeçalhos procurados tem byte zero, então tirá-los não muda nada.
+e_banco() {
+  case "${1##*.}" in
+    db|sqlite|sqlite3) [ "$(head -c 15 "$1" 2>/dev/null | tr -d '\0')" = "SQLite format 3" ] ;;
+    dump)              [ "$(head -c 5  "$1" 2>/dev/null | tr -d '\0')" = "PGDMP" ] ;;
+    sql)               head -c 200 "$1" 2>/dev/null | grep -q 'PostgreSQL database dump' ;;
+    *)                 false ;;
+  esac
+}
+
 echo ""
-echo "  Limpando o histórico já guardado"
+echo "  Limpando o histórico já guardado (só banco de dados)"
 APAGADOS=0
 BYTES=0
+IGNORADOS=0
 for pasta in ${PASTAS_HIST+"${PASTAS_HIST[@]}"}; do
   REL="${pasta#"$RAIZ_PROJETOS"/}"
   PROJ="${REL%%/*}"
@@ -449,6 +480,9 @@ for pasta in ${PASTAS_HIST+"${PASTAS_HIST[@]}"}; do
   unset VISTA; declare -A VISTA=()
   while IFS=$'\t' read -r quando tam arq; do
     [ -n "${arq:-}" ] || continue
+    # ANTES DE QUALQUER COISA. Ver o comentário da `e_banco`: o que não é banco
+    # não é apagado E não conta para eleger a cópia mais recente.
+    if ! e_banco "$arq"; then IGNORADOS=$((IGNORADOS + 1)); continue; fi
     NOME="$(basename "$arq")"
     EXT="${NOME##*.}"
     # Tira o carimbo de data do fim do nome para achar a família. Os projetos
@@ -470,14 +504,16 @@ for pasta in ${PASTAS_HIST+"${PASTAS_HIST[@]}"}; do
       N_P=$((N_P + 1)); B_P=$((B_P + tam))
     fi
   done < <(
-    # Só arquivo de banco. Um README, um .gitkeep ou qualquer coisa que alguém
-    # tenha deixado na pasta não é backup e não me diz respeito.
-    # `-maxdepth 1` e `-type f`: não desço em subpasta e não sigo atalho —
-    # um link simbólico apontando para `data/site.db` faria o `rm` acertar o
-    # banco vivo.
+    # A extensão aqui é só um PRÉ-FILTRO barato, para não ler o cabeçalho de
+    # cada foto da pasta. Quem decide é a `e_banco`, lá dentro.
+    #
+    # `-maxdepth 1`: não desço em subpasta. Se alguém guardar `backups/fotos/`,
+    # ela não é nem olhada.
+    # `-type f`: não sigo atalho. Um link simbólico chamado `site.db` apontando
+    # para `data/site.db` faria o `rm` acertar o banco VIVO do cliente.
     find "$pasta" -maxdepth 1 -type f \
          \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \
-            -o -name '*.sql' -o -name '*.dump' -o -name '*.gz' -o -name '*.zip' \) \
+            -o -name '*.sql' -o -name '*.dump' \) \
          -printf '%T@\t%s\t%p\n' 2>/dev/null | LC_ALL=C sort -rn
   )
   if [ "$N_P" -gt 0 ]; then
@@ -489,7 +525,11 @@ for pasta in ${PASTAS_HIST+"${PASTAS_HIST[@]}"}; do
 done
 if [ "$APAGADOS" -gt 0 ]; then
   echo ""
-  v "$APAGADOS arquivo(s) apagados do servidor · $((BYTES / 1048576)) MB livres"
+  v "$APAGADOS banco(s) apagados do servidor · $((BYTES / 1048576)) MB livres"
   v "estão no snapshot acima, com a retenção de 14/8/12/3"
 fi
+# Sai na tela porque é a prova de que a regra de conteúdo está funcionando. Se
+# um dia este número crescer sem explicação, é sinal de que algo que não é banco
+# está sendo guardado numa pasta `backups/` — e é bom saber disso.
+[ "$IGNORADOS" -eq 0 ] || a "$IGNORADOS arquivo(s) não são banco e não foram tocados"
 echo ""
