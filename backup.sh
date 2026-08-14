@@ -8,7 +8,9 @@
 #    2. congela cada banco num diretório de trabalho;
 #    3. manda tudo para o Cloudflare R2, CIFRADO, com o restic;
 #    4. apaga o diretório de trabalho;
-#    5. confere que o snapshot chegou.
+#    5. confere que o snapshot chegou;
+#    6. e SÓ ENTÃO limpa as pastas `backups/` dos projetos, deixando a cópia
+#       mais recente de cada banco.
 #
 #  TRÊS DECISÕES QUE VALEM SER LIDAS
 #
@@ -22,11 +24,18 @@
 #    aqui e no seu gerenciador de senhas; a Cloudflare guarda blocos que ela não
 #    consegue ler. Sem isso, o backup vira um segundo lugar de onde vazar.
 #
-#  · O SERVIDOR NÃO APAGA HISTÓRICO. Este script nunca roda `prune`. Ele só
-#    escreve e, no máximo, esquece referências de snapshot. Quem apaga de
+#  · O SERVIDOR NÃO APAGA O REPOSITÓRIO. Este script nunca roda `prune`. Ele só
+#    escreve lá e, no máximo, esquece referências de snapshot. Quem apaga de
 #    verdade é você, da sua máquina, de vez em quando. Somado à trava do bucket
 #    no R2, isso é o que faz um servidor invadido não conseguir destruir o
 #    backup junto — que é o roteiro de todo ransomware.
+#
+#    O passo 10 apaga arquivos, mas do DISCO DO SERVIDOR, nunca do repositório,
+#    e a distinção é o ponto inteiro: ele tira daqui cópias que já estão lá.
+#    Quem tem a chave deste servidor continua sem conseguir remover um byte do
+#    histórico no R2 — que é o que importa no dia da invasão. E ele só roda
+#    depois de o snapshot ter sido procurado e encontrado: se o envio falhar,
+#    nada é apagado, e o servidor termina o dia com tudo o que tinha.
 # ==========================================================================
 set -euo pipefail
 
@@ -116,8 +125,9 @@ done < <(
   # pasta deixou de importar.
   #
   # `node_modules` fica de fora porque bibliotecas trazem bancos de teste.
-  # `backups` fica de fora porque são cópias do mesmo banco — o restic
-  # deduplicaria, mas a lista na tela viraria ilegível.
+  # `backups` fica de fora DESTA lista porque são dezenas de cópias do mesmo
+  # banco e a tela viraria ilegível — mas elas não ficam de fora do backup: têm
+  # o passo 4 só para elas, com uma linha por projeto.
   find "$RAIZ_PROJETOS" -maxdepth 4 -type f \
        \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) \
        -not -path '*/node_modules/*' \
@@ -224,7 +234,71 @@ done < <(
 )
 [ "$N_ARQ" -gt 0 ] || a "nenhuma pasta de arquivos enviados"
 
-# --------------------------------------------------- 4. o que foi guardado
+# ------------------------------------------- 4. histórico das pastas backups/
+#
+# Cada projeto faz a PRÓPRIA cópia do banco e guarda em `<projeto>/backups`,
+# girando as 30 mais recentes (ver o `backup.js` de cada site). Até a v1.1.0
+# essas pastas ficavam de FORA daqui — a busca de SQLite as excluía de
+# propósito, para a lista na tela não virar centenas de linhas.
+#
+# Isso deixava de pé uma diferença que só apareceria no pior dia possível: o
+# snapshot tem o banco VIVO de hoje; aquelas pastas têm PONTOS NO TEMPO — como
+# o banco estava três semanas atrás, antes de alguém apagar a coluna errada.
+# São coisas diferentes, e a segunda não existia em lugar nenhum fora do disco
+# do servidor.
+#
+# Entram aqui num grupo só, com UMA linha por projeto — o motivo de excluí-las
+# era a tela, e a tela continua legível. E é esta cópia que AUTORIZA a limpeza
+# do passo 10: só apago do servidor o que já provei que subiu.
+echo ""
+echo "  Histórico local (pastas backups/)"
+N_HIST=0
+PASTAS_HIST=()
+mkdir -p "$TRABALHO/historico"
+
+# A MARCA DE TEMPO EXISTE POR CAUSA DA LIMPEZA, não por causa da cópia.
+#
+# Os sites gravam a cópia deles a qualquer hora — o `agendarBackups` bate de
+# hora em hora. Se um deles escrever um arquivo DEPOIS desta linha, ele não
+# está no snapshot que estou montando, e apagá-lo no passo 10 seria destruir a
+# única cópia existente. Guardando o instante em que comecei, o passo 10 só
+# considera o que já estava aqui. O `- 1` é folga para o arquivo escrito no
+# mesmo segundo: na dúvida, o arquivo fica.
+MARCA=$(( $(date +%s) - 1 ))
+
+while IFS= read -r pasta; do
+  [ -d "$pasta" ] || continue
+  [ -n "$(ls -A "$pasta" 2>/dev/null)" ] || continue
+  REL="${pasta#"$RAIZ_PROJETOS"/}"
+  PROJ="${REL%%/*}"
+  DEST="$TRABALHO/historico/$(echo "$REL" | tr '/' '~')"
+  mkdir -p "$DEST"
+  # `cp -al` de novo: ligação rígida, sem gastar disco. Importa mais aqui do
+  # que nos anexos — são dezenas de cópias de banco, e copiar de verdade podia
+  # encher o /var/tmp antes de o restic começar.
+  if cp -al "$pasta"/. "$DEST"/ 2>/dev/null || cp -a "$pasta"/. "$DEST"/ 2>/dev/null; then
+    v "$PROJ  $(ls -1 "$DEST" | wc -l) arquivo(s) · $(du -sh "$DEST" | cut -f1)"
+    PASTAS_HIST+=("$pasta")
+    N_HIST=$((N_HIST + 1))
+  else
+    # FALHA DE VERDADE, e não um aviso. Se não consigo levar o histórico para o
+    # R2, o passo 10 não pode apagá-lo — e o jeito de garantir isso é este
+    # contador, que faz o script sair antes de chegar lá.
+    x "$PROJ — não consegui copiar o histórico; nada será limpo hoje"
+    FALHAS=$((FALHAS + 1))
+  fi
+done < <(
+  # Nome EXATO `backups`, não `*backup*`. A busca larga pegaria a pasta do
+  # próprio LA-Backup se ele um dia for clonado aqui dentro, e a limpeza do
+  # passo 10 apagaria os arquivos dele.
+  find "$RAIZ_PROJETOS" -maxdepth 3 -type d -name 'backups' \
+       -not -path '*/node_modules/*' \
+       -not -path '*/.git/*' \
+       2>/dev/null | sort
+)
+[ "$N_HIST" -gt 0 ] || a "nenhuma pasta backups/ nos projetos"
+
+# --------------------------------------------------- 5. o que foi guardado
 # Um mapa do que existia no dia. Na hora de restaurar, ele responde "o que era
 # para estar aqui?" — pergunta que ninguém consegue responder de memória seis
 # meses depois.
@@ -241,6 +315,9 @@ done < <(
   echo "## Arquivos ($N_ARQ)"
   du -sh "$TRABALHO"/arquivos/* 2>/dev/null || true
   echo ""
+  echo "## Histórico local — pastas backups/ dos projetos ($N_HIST)"
+  du -sh "$TRABALHO"/historico/* 2>/dev/null || true
+  echo ""
   echo "## Serviços no ar"
   systemctl list-units --type=service --state=running --no-legend --no-pager 2>/dev/null |
     awk '{print $1}' | grep -v '^systemd' || true
@@ -253,7 +330,7 @@ if [ "$TOTAL" -eq 0 ]; then
   exit 1
 fi
 
-# ------------------------------------------------------------- 5. enviar
+# ------------------------------------------------------------- 6. enviar
 echo ""
 echo "  Enviando para o R2"
 if ! restic snapshots >/dev/null 2>&1; then
@@ -275,7 +352,7 @@ restic backup "$TRABALHO" \
   --compression auto \
   | sed 's/^/     /'
 
-# ------------------------------------------------------- 6. só ESQUECER
+# ------------------------------------------------------- 7. só ESQUECER
 # `forget` sem `--prune`: tira as referências de snapshot antigas, e NÃO apaga
 # um byte de dado. Quem apaga é você, da sua máquina, com o `podar` do
 # restaurar.sh. Se este servidor for invadido, a chave que ele carrega não
@@ -285,18 +362,18 @@ restic forget \
   --tag automatico \
   | sed 's/^/     /'
 
-# --------------------------------------------------------- 7. conferir
+# --------------------------------------------------------- 8. conferir
 echo ""
 ULTIMO="$(restic snapshots --latest 1 --json 2>/dev/null | head -c 4000)"
 if echo "$ULTIMO" | grep -q '"time"'; then
   v "snapshot no ar: $(echo "$ULTIMO" | sed -n 's/.*"short_id":"\([^"]*\)".*/\1/p' | head -1)"
-  v "guardados: $N_SQLITE SQLite · $N_PG PostgreSQL · $N_ARQ pastas"
+  v "guardados: $N_SQLITE SQLite · $N_PG PostgreSQL · $N_ARQ pastas · $N_HIST históricos"
 else
   x "o snapshot NÃO apareceu no repositório depois do envio."
   exit 1
 fi
 
-# ------------------------------------------------- 8. FALHA É FALHA
+# ------------------------------------------------- 9. FALHA É FALHA
 #
 # Esta é a parte que a primeira versão não tinha, e a falta dela foi o pior
 # defeito de tudo que escrevi aqui.
@@ -320,8 +397,99 @@ if [ "$FALHAS" -gt 0 ]; then
   x "  O que deu certo FOI enviado e está no snapshot acima,"
   x "  mas NÃO trate isto como um backup bom."
   x "  Os erros de cada item estão logo acima, na saída."
+  x "  Nada foi apagado do servidor."
   x "══════════════════════════════════════════════════════"
   echo ""
   exit 1
+fi
+
+# ------------------------------------- 10. LIMPAR O HISTÓRICO DO SERVIDOR
+#
+# Daqui para baixo, três coisas já são verdade — e é por isso que este trecho
+# mora AQUI, e não dentro de um `if` mais acima:
+#
+#   · nenhum item falhou (o `exit 1` de cima já teria saído);
+#   · o `restic backup` terminou sem erro;
+#   · o snapshot foi PROCURADO no repositório e apareceu (passo 8).
+#
+# A segunda depende do `pipefail` lá no alto, e vale saber por quê: o envio é
+# `restic backup ... | sed`, e o código de saída de um cano é o do ÚLTIMO
+# comando. Sem `pipefail`, o `sed` devolveria zero com o restic tendo falhado,
+# o `set -e` não veria nada, e a limpeza apagaria o histórico do servidor por
+# causa de um backup que não subiu. É o mesmo tipo de silêncio que fez a v1.0.1
+# dizer "Pronto" com oito bancos faltando — só que agora o silêncio apagaria
+# arquivo.
+#
+# A ordem é o guarda. Um `if [ "$FALHAS" -eq 0 ]` no meio do arquivo daria a
+# mesma resposta hoje e seria fácil de furar amanhã, com um `continue` novo ou
+# uma condição a mais. Estar depois do `exit` é mais difícil de quebrar sem
+# perceber.
+#
+# O QUE FICA: a cópia MAIS RECENTE de cada banco, em cada projeto.
+#
+# Não é conservadorismo — é o que impede um efeito colateral. O `agendarBackups`
+# de cada site decide se está na hora de copiar lendo a DATA dos arquivos desta
+# pasta (`ultimaCopia`, no backup.js). Pasta vazia significa "nunca houve
+# cópia", e na batida seguinte todo projeto refaria a cópia na hora — inclusive
+# um `pg_dump` novo no BemEstar, no Kenósis e no Borda Tudo. Eu esvaziaria a
+# pasta às 4h para ela encher de novo às 5h, com um dump a mais por dia de
+# custo. Deixando a mais recente, o ciclo de 24h de cada site segue intacto e o
+# painel do cliente continua mostrando quando foi a última cópia.
+echo ""
+echo "  Limpando o histórico já guardado"
+APAGADOS=0
+BYTES=0
+for pasta in ${PASTAS_HIST+"${PASTAS_HIST[@]}"}; do
+  REL="${pasta#"$RAIZ_PROJETOS"/}"
+  PROJ="${REL%%/*}"
+  N_P=0; B_P=0
+  # Uma família por banco E por formato: `site` (.db) e `bemestar_gestao`
+  # (.sql) são coisas distintas e cada uma guarda a sua mais recente. Sem
+  # separar, a cópia do SQLite morreria porque o dump do Postgres é mais novo.
+  unset VISTA; declare -A VISTA=()
+  while IFS=$'\t' read -r quando tam arq; do
+    [ -n "${arq:-}" ] || continue
+    NOME="$(basename "$arq")"
+    EXT="${NOME##*.}"
+    # Tira o carimbo de data do fim do nome para achar a família. Os projetos
+    # usam duas convenções — `site.2026-08-04_131414.db` (CW Mendes, Forms,
+    # BemEstar) e `site-2026-08-11T20-23-40.db` (Riacho Solar) — e as duas
+    # começam num separador seguido do ano. Cortar dali resolve as duas sem
+    # precisar de uma lista de projetos, que é justamente o que este projeto
+    # inteiro evita.
+    FAM="$(printf '%s' "${NOME%.*}" | sed -E 's/[._-][0-9]{4}.*$//')"
+    CHAVE="$FAM|$EXT"
+    if [ -z "${VISTA[$CHAVE]:-}" ]; then
+      VISTA[$CHAVE]=1   # veio ordenado do mais novo para o mais velho: este fica
+      continue
+    fi
+    # NÃO APAGO O QUE CHEGOU DEPOIS DE EU COPIAR. Um site que gravou a cópia
+    # dele enquanto o restic subia tem um arquivo que NÃO está no snapshot.
+    [ "${quando%.*}" -le "$MARCA" ] || continue
+    if rm -f "$arq"; then
+      N_P=$((N_P + 1)); B_P=$((B_P + tam))
+    fi
+  done < <(
+    # Só arquivo de banco. Um README, um .gitkeep ou qualquer coisa que alguém
+    # tenha deixado na pasta não é backup e não me diz respeito.
+    # `-maxdepth 1` e `-type f`: não desço em subpasta e não sigo atalho —
+    # um link simbólico apontando para `data/site.db` faria o `rm` acertar o
+    # banco vivo.
+    find "$pasta" -maxdepth 1 -type f \
+         \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \
+            -o -name '*.sql' -o -name '*.dump' -o -name '*.gz' -o -name '*.zip' \) \
+         -printf '%T@\t%s\t%p\n' 2>/dev/null | LC_ALL=C sort -rn
+  )
+  if [ "$N_P" -gt 0 ]; then
+    v "$PROJ  $N_P arquivo(s) · $((B_P / 1024)) KB liberados"
+    APAGADOS=$((APAGADOS + N_P)); BYTES=$((BYTES + B_P))
+  else
+    a "$PROJ  nada a limpar — só havia a cópia mais recente"
+  fi
+done
+if [ "$APAGADOS" -gt 0 ]; then
+  echo ""
+  v "$APAGADOS arquivo(s) apagados do servidor · $((BYTES / 1048576)) MB livres"
+  v "estão no snapshot acima, com a retenção de 14/8/12/3"
 fi
 echo ""

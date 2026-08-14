@@ -85,8 +85,26 @@ echo "  scripts em $DESTINO"
 # ------------------------------------------------------------ 4. timer
 cp systemd/la-backup.service systemd/la-backup.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now la-backup.timer
-echo "  timer diario ligado: $(systemctl show -p NextElapseUSecRealtime --value la-backup.timer)"
+systemctl enable la-backup.timer >/dev/null 2>&1 || true
+
+# `restart`, e nao `enable --now`.
+#
+# `enable --now` so LIGA o que esta parado: num timer que ja esta no ar ele nao
+# faz nada. E `daemon-reload` releu o arquivo novo mas nao re-arma o disparo que
+# ja estava agendado. Junto, isso quer dizer que trocar o horario neste projeto
+# e rodar o instalador de novo copiava o arquivo com 04:00, imprimia uma linha
+# de sucesso e o backup continuava saindo as 03:20 — a mudanca de horario nao
+# acontecia, e nada dizia isso. `restart` re-arma e o horario novo vale.
+systemctl restart la-backup.timer
+
+echo "  timer diario ligado:"
+# O QUE ESTA LINHA MOSTRA E O TESTE DA LINHA DE CIMA.
+#
+# Antes aqui havia `systemctl show -p NextElapseUSecRealtime`, que devolve
+# microssegundos desde 1970 — um numero de 16 digitos. Era a unica coisa na
+# tela capaz de denunciar o horario errado, e estava num formato que ninguem
+# le. `list-timers` diz a data e quanto falta, em portugues de gente.
+systemctl list-timers la-backup.timer --no-pager | sed 's/^/     /'
 
 # ------------------------------------------------------------ 5. agora
 echo ""

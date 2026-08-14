@@ -10,6 +10,8 @@ Cobre, sem lista escrita à mão:
 - todo banco **PostgreSQL** do servidor (descobertos no catálogo)
 - as pastas de **arquivos enviados** — anexo, foto, mídia, documento — que não
   estão no git e só existem no disco
+- o **histórico** que cada projeto guarda na própria pasta `backups/` — os
+  pontos no tempo do banco, que não são a mesma coisa que o banco de hoje
 - um **inventário** do dia: o que existia e quais serviços rodavam
 
 Site novo entra sozinho no backup. É o ponto de descobrir em vez de listar: uma
@@ -41,6 +43,39 @@ a chave do servidor na mão não consegue tirar o histórico recente.
 
 **Backup que nunca foi restaurado não é backup.** Por isso existe o `--ensaio`,
 e por isso ele é o comando que o instalador manda você rodar no fim.
+
+---
+
+## A limpeza das pastas `backups/`
+
+Roda às 4h, **depois** do backup, e **só quando ele deu certo**.
+
+Cada site faz a própria cópia do banco e guarda em `<projeto>/backups`, girando
+as 30 mais recentes. Isso é bom contra `rm` errado e ruim contra disco morto:
+a cópia mora no mesmo disco do original. Com o R2 no ar, ela virou espaço
+ocupado à toa.
+
+O que acontece, nesta ordem:
+
+1. o histórico daquelas pastas **entra no snapshot** (passo 4 do `backup.sh`);
+2. o snapshot é enviado e o script **procura por ele** no repositório;
+3. se qualquer coisa falhou, o script sai com erro — **e nada é apagado**;
+4. só então cada pasta fica com a **cópia mais recente de cada banco**.
+
+O código da limpeza fica *depois* do `exit 1` da falha, e não dentro de um `if`.
+É a mesma regra dita de um jeito que é mais difícil de furar sem perceber.
+
+**Por que sobra a mais recente, em vez de esvaziar.** O `agendarBackups` de cada
+site decide se está na hora de copiar lendo a **data dos arquivos dessa pasta**.
+Pasta vazia significa "nunca houve cópia": na batida seguinte todos os projetos
+copiariam na hora, com um `pg_dump` novo no BemEstar, no Kenósis e no Borda
+Tudo. Eu esvaziaria às 4h para encher de novo às 5h, com um dump a mais por dia
+de custo. Deixando a mais recente, o ciclo de 24h de cada site segue intacto e o
+painel do cliente continua respondendo "quando foi a última cópia".
+
+**O que a limpeza não toca:** arquivo que não é banco (um `LEIA-ME`, um
+`.gitkeep`), subpasta, atalho — e nada que tenha sido gravado **depois** do
+momento em que o histórico foi copiado, porque esse ainda não está no snapshot.
 
 ---
 
@@ -80,9 +115,9 @@ depois — a resposta da API não é prova de que a regra ficou ativa.
 sudo bash instalar.sh
 ```
 
-Ele pede as quatro coisas do R2, instala o restic, cria o timer diário e **faz o
-primeiro backup na hora**, com você olhando — para o erro aparecer agora e não
-às três da manhã.
+Ele pede as quatro coisas do R2, instala o restic, cria o timer **diário das
+04:00** e **faz o primeiro backup na hora**, com você olhando — para o erro
+aparecer agora e não às quatro da manhã.
 
 Se você deixar a senha de cifra em branco, ele sorteia uma e obriga a confirmar
 que foi para o gerenciador de senhas antes de gravar qualquer coisa.
@@ -146,6 +181,12 @@ Guarda 14 diários, 8 semanais, 12 mensais e 3 anuais. Como o restic deduplica e
 os bancos mudam pouco de um dia para o outro, o segundo backup custa quase nada
 em espaço.
 
+O histórico das pastas `backups/` entra por inteiro **uma vez** — no primeiro
+backup depois desta versão. Do segundo em diante, aquelas pastas já foram
+limpas e só têm a cópia mais recente, então o snapshot do dia volta a ser
+pequeno. Os pontos no tempo de julho e agosto ficam guardados **naquele
+primeiro snapshot**, sujeitos à retenção abaixo como qualquer outro.
+
 Na escala destes dez projetos, isso cabe folgado nos **10 GB gratuitos do R2**.
 O R2 também não cobra taxa de saída, o que importa no dia em que você precisar
 baixar tudo — é justamente o dia em que o custo não pode ser uma surpresa.
@@ -156,7 +197,7 @@ Se qualquer item não puder ser copiado, o script:
 
 1. imprime o erro real daquele item (não engole a mensagem);
 2. envia mesmo assim o que deu certo — meio backup vale mais que zero;
-3. etiqueta o snapshot como `INCOMPLETO`;
+3. etiqueta o snapshot como `INCOMPLETO` e **não limpa nada do servidor**;
 4. **sai com código diferente de zero**, então o systemd marca o serviço como
    falho e o `verificar.sh` grita;
 5. e o `restaurar.sh --ensaio` **reprova** enquanto o último snapshot estiver

@@ -2,13 +2,16 @@
 Description=LA Backup — todo dia de madrugada
 
 [Timer]
-# 03:20, e nao 03:00: a hora cheia e onde todo cron do mundo dispara junto.
-OnCalendar=*-*-* 03:20:00
-# Espalha ate 20 minutos. Se um dia houver um segundo servidor, os dois nao
-# saem no mesmo segundo disputando banda.
-RandomizedDelaySec=20m
+# 04:00 em ponto, por decisao do dono do servidor.
+OnCalendar=*-*-* 04:00:00
+# Sem espalhamento: "as 4h" tem de significar as 4h. A versao anterior sorteava
+# ate 20 minutos para nao disputar banda caso surgisse um segundo servidor;
+# hoje ha um so, e a hora previsivel vale mais — e ela que deixa dizer, olhando
+# o relogio, se o backup de hoje ja passou. Se um dia houver um segundo
+# servidor, o lugar de voltar a espalhar e esta linha.
+RandomizedDelaySec=0
 # Se a maquina estava desligada na hora, roda assim que ligar. Sem isto, um
-# reboot as 03:00 pula o backup do dia inteiro, calado.
+# reboot as 04:00 pula o backup do dia inteiro, calado.
 Persistent=true
 
 [Install]

@@ -20,7 +20,15 @@ v "destino: $(echo "$RESTIC_REPOSITORY" | sed 's|.*/||') no Cloudflare R2"
 
 # timer
 if systemctl is-active --quiet la-backup.timer; then
-  v "timer ligado · proximo: $(systemctl show -p NextElapseUSecRealtime --value la-backup.timer)"
+  # `NextElapseUSecRealtime` vem em MICROSSEGUNDOS desde 1970 — um numero de 16
+  # digitos. Impresso cru, era a pergunta "a que horas o backup roda?" respondida
+  # com algo que ninguem confere; foi assim que uma troca de horario passou
+  # despercebida. Divide por um milhao e vira hora de relogio.
+  PROX="$(systemctl show -p NextElapseUSecRealtime --value la-backup.timer 2>/dev/null)"
+  case "${PROX:-0}" in
+    ''|*[!0-9]*|0) v "timer ligado · proximo disparo nao informado" ;;
+    *) v "timer ligado · proximo: $(date -d "@$((PROX / 1000000))" '+%d/%m/%Y as %H:%M' 2>/dev/null || echo "$PROX")" ;;
+  esac
 else
   x "TIMER PARADO — nao ha backup automatico. sudo systemctl enable --now la-backup.timer"
 fi
